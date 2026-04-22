@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Camera } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Camera, Download, Pause, Play } from "lucide-react";
 import type ReactPlayerType from "react-player";
 import { Modal } from "./ui/modal";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,19 @@ const INPUT_STYLE: React.CSSProperties = {
   outline: "none",
 };
 
+/** Kick off a browser save-as for a server-hosted asset. Using an anchor
+ *  with the `download` attribute is the smallest cross-browser way to do
+ *  this without a library — Safari ignores `download` for cross-origin
+ *  URLs, but our media is served from the same origin. */
+function triggerDownload(url: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 export type ClipDraft = {
   /** Start of the first segment — used for seeking and the screenshot frame. */
   startSec: number;
@@ -36,6 +49,10 @@ export type ClipDraft = {
   /** Always populated. Length 1 → single-range card; length > 1 → concat card
    *  that the backend merges into a single MP3 via ffmpeg filter_complex. */
   segments: { startSec: number; endSec: number }[];
+  /** Pre-select this target word on open instead of the longest-content-word
+   *  heuristic. Set by the word-hover "Make card" popup so the word the user
+   *  actually clicked becomes the card target. */
+  targetWord?: string;
 };
 
 /**
@@ -68,19 +85,26 @@ export function ClipModal({
   const [translation, setTranslation] = useState("");
   const [definition, setDefinition] = useState("");
   const [busy, setBusy] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
-  // Default target word = longest content word in the selection. Usually
-  // matches the word the user actually cares about.
+  // Target word defaults: an explicit `clip.targetWord` hint (from the word-
+  // hover "Card" popup) wins; otherwise pick the longest content word in
+  // the selection as a reasonable guess.
   useEffect(() => {
     if (!open || targetWord) return;
+    const hinted = clip.targetWord?.replace(/[^\p{L}\p{N}]/gu, "");
+    if (hinted) {
+      setTargetWord(hinted);
+      return;
+    }
     const longest = clip.words
       .map((w) => w.surface.replace(/[^\p{L}\p{N}]/gu, ""))
       .filter((w) => w.length > 0)
       .reduce((best, curr) => (curr.length > best.length ? curr : best), "");
     setTargetWord(longest);
-  }, [open, clip.words, targetWord]);
+  }, [open, clip.words, clip.targetWord, targetWord]);
 
   const captureScreenshot = useCallback(() => {
     const rp = playerRef.current;
@@ -177,6 +201,40 @@ export function ClipModal({
     }
   }, [meta, language, clip, targetWord, translation, definition, screenshot]);
 
+  const download = useCallback(async () => {
+    setDownloading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/clip", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          videoId: meta.videoId,
+          segments: clip.segments,
+          screenshotSec: clip.startSec,
+        }),
+      });
+      if (!res.ok) {
+        setError(await parseApiError(res));
+        return;
+      }
+      const data = (await res.json()) as {
+        audioFilename: string;
+        audioUrl: string;
+        screenshotFilename: string | null;
+        screenshotUrl: string | null;
+      };
+      triggerDownload(data.audioUrl, data.audioFilename);
+      if (data.screenshotUrl && data.screenshotFilename) {
+        triggerDownload(data.screenshotUrl, data.screenshotFilename);
+      }
+    } catch (err) {
+      setError({ message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setDownloading(false);
+    }
+  }, [meta.videoId, clip.segments, clip.startSec]);
+
   return (
     <Modal
       open={open}
@@ -233,6 +291,11 @@ export function ClipModal({
                 </>
               )}
             </div>
+            <ClipPreviewPlayer
+              open={open}
+              audioUrl={meta.audioUrl}
+              segments={clip.segments}
+            />
           </div>
 
           <div className="flex flex-col gap-2">
@@ -307,14 +370,30 @@ export function ClipModal({
           {error && <ErrorCallout error={error} />}
 
           <div className="mt-2 flex items-center justify-end gap-3">
-            <Button variant="ghost" size="md" onClick={onClose} disabled={busy}>
+            <Button variant="ghost" size="md" onClick={onClose} disabled={busy || downloading}>
               Cancel
+            </Button>
+            <Button
+              variant="ghost"
+              size="md"
+              onClick={download}
+              disabled={busy || downloading}
+            >
+              {downloading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" /> Preparing…
+                </>
+              ) : (
+                <>
+                  <Download size={16} /> Download
+                </>
+              )}
             </Button>
             <Button
               variant="primary"
               size="md"
               onClick={submit}
-              disabled={busy || !targetWord}
+              disabled={busy || downloading || !targetWord}
             >
               {busy ? (
                 <>
@@ -328,5 +407,153 @@ export function ClipModal({
         </div>
       )}
     </Modal>
+  );
+}
+
+/**
+ * Preview the clip audio inside the modal so the user can hear what ships
+ * to Anki before sending. Uses the cached `audio.mp3` directly with seek +
+ * timeupdate rather than calling a server-side cut — zero extra backend
+ * work and zero latency between mark and preview.
+ *
+ * Single-range clips jump to `startSec` and stop at `endSec`. Concat (multi-
+ * segment) clips advance through the ranges by re-seeking `currentTime`
+ * each time the current segment finishes, producing the same playback a
+ * user will hear from the merged MP3 without waiting for ffmpeg.
+ */
+function ClipPreviewPlayer({
+  open,
+  audioUrl,
+  segments,
+}: {
+  open: boolean;
+  audioUrl: string;
+  segments: { startSec: number; endSec: number }[];
+}) {
+  const ref = useRef<HTMLAudioElement>(null);
+  const segIdxRef = useRef(0);
+  const [segIdx, setSegIdx] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const totalDuration = segments.reduce((a, s) => a + (s.endSec - s.startSec), 0);
+
+  // Stop playback whenever the modal closes — otherwise the audio keeps
+  // going under a hidden modal, which is jarring.
+  useEffect(() => {
+    if (open) return;
+    ref.current?.pause();
+    setPlaying(false);
+    segIdxRef.current = 0;
+    setSegIdx(0);
+  }, [open]);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onTime = () => {
+      const i = segIdxRef.current;
+      const seg = segments[i];
+      if (!seg) return;
+      if (el.currentTime >= seg.endSec) {
+        const next = segments[i + 1];
+        if (next) {
+          segIdxRef.current = i + 1;
+          setSegIdx(i + 1);
+          el.currentTime = next.startSec;
+        } else {
+          el.pause();
+          setPlaying(false);
+          segIdxRef.current = 0;
+          setSegIdx(0);
+        }
+      }
+    };
+    const onEnded = () => setPlaying(false);
+    el.addEventListener("timeupdate", onTime);
+    el.addEventListener("ended", onEnded);
+    return () => {
+      el.removeEventListener("timeupdate", onTime);
+      el.removeEventListener("ended", onEnded);
+    };
+  }, [segments]);
+
+  const toggle = useCallback(async () => {
+    const el = ref.current;
+    if (!el) return;
+    if (playing) {
+      el.pause();
+      setPlaying(false);
+      return;
+    }
+    // Resume from current spot if we're still inside a segment; otherwise
+    // restart from segment 0.
+    const i = segIdxRef.current;
+    const seg = segments[i];
+    if (!seg || el.currentTime < seg.startSec || el.currentTime >= seg.endSec) {
+      segIdxRef.current = 0;
+      setSegIdx(0);
+      el.currentTime = segments[0]!.startSec;
+    }
+    try {
+      await el.play();
+      setPlaying(true);
+    } catch {
+      // Autoplay policies can reject play() if the user never interacted —
+      // unlikely in a modal they just opened, but silently ignore.
+      setPlaying(false);
+    }
+  }, [playing, segments]);
+
+  return (
+    <div
+      className="mt-2 flex items-center gap-2 px-2 py-2"
+      style={{
+        background: "var(--color-surface)",
+        border: "1px solid var(--color-line)",
+        borderRadius: "var(--radius-sm)",
+      }}
+    >
+      <audio ref={ref} src={audioUrl} preload="metadata" />
+      <button
+        type="button"
+        onClick={toggle}
+        aria-label={playing ? "Pause preview" : "Play preview"}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 28,
+          height: 28,
+          borderRadius: "50%",
+          background: "var(--color-blue-strong)",
+          color: "#fff",
+          border: "none",
+          cursor: "pointer",
+          flexShrink: 0,
+        }}
+      >
+        {playing ? <Pause size={14} /> : <Play size={14} />}
+      </button>
+      <span
+        className="text-xs"
+        style={{
+          fontFamily: "var(--font-ui)",
+          fontWeight: 700,
+          color: "var(--color-ink)",
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        Preview · {totalDuration.toFixed(2)}s
+      </span>
+      {segments.length > 1 && (
+        <span
+          className="text-xs"
+          style={{ color: "var(--color-muted)", fontFamily: "var(--font-ui)" }}
+        >
+          {playing || segIdx > 0
+            ? `segment ${segIdx + 1} / ${segments.length}`
+            : `${segments.length} segments`}
+        </span>
+      )}
+    </div>
   );
 }

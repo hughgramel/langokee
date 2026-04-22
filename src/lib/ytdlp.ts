@@ -159,37 +159,47 @@ export type YtDlpInfo = {
  * slashes are standard yt-dlp format-fallback syntax.
  */
 /**
- * Locate a manually-uploaded VTT caption for `videoId` in the requested
- * language. Returns the absolute file path or null.
+ * Fetch just the info.json + a single VTT caption track for `url`, without
+ * downloading video/audio. Used by the upload modal's probe flow so the
+ * caption textarea can populate before the user commits to a full ingest
+ * (video download is still needed at align time, but that's one step later).
  *
- * yt-dlp names VTT files `video.<lang>.vtt`, but YouTube also returns
- * locale variants — `zh-Hans`, `zh-CN`, `en-US`. We prefix-match on the
- * 2-letter base so `"zh"` finds `video.zh-Hans.vtt`.
+ * `lang` must be an exact yt-dlp language code from the probe result — e.g.
+ * "en", "zh-Hans". Set `auto: true` when fetching a YouTube ASR track
+ * (probe's `autoSubtitles`), which requires `--write-auto-subs`.
  *
- * The info.json tells us which languages are *manual* vs *auto* (yt-dlp
- * writes both as `video.<lang>.vtt` on disk with no indication). We
- * cross-reference info.json's `subtitles` key so callers get only the
- * high-quality human-uploaded track and never silently fall back to ASR
- * captions.
+ * Files land at `public/media/{videoId}/video.<lang>.vtt` so a later
+ * `downloadVideo` call finds them already on disk and yt-dlp skips re-
+ * fetching the same subtitle.
  */
-export async function findManualSubtitle(
+export async function downloadSubtitleOnly(
+  url: string,
   videoId: string,
   lang: string,
+  { auto = false }: { auto?: boolean } = {},
 ): Promise<string | null> {
   const dir = mediaDir(videoId);
-  const infoPath = path.join(dir, "video.info.json");
-  let info: { subtitles?: Record<string, unknown> };
-  try {
-    info = JSON.parse(await fs.readFile(infoPath, "utf8")) as typeof info;
-  } catch {
-    return null;
-  }
-  const manualLangs = info.subtitles ? Object.keys(info.subtitles) : [];
-  const base = lang.slice(0, 2).toLowerCase();
-  const match = manualLangs.find((k) => k.toLowerCase().startsWith(base));
-  if (!match) return null;
-
-  const vttPath = path.join(dir, `video.${match}.vtt`);
+  await fs.mkdir(dir, { recursive: true });
+  const outputTemplate = path.join(dir, "video.%(ext)s");
+  await run(
+    YTDLP,
+    [
+      "--no-playlist",
+      "--no-warnings",
+      "--skip-download",
+      "--write-info-json",
+      auto ? "--write-auto-subs" : "--write-subs",
+      "--sub-format",
+      "vtt",
+      "--sub-langs",
+      lang,
+      "-o",
+      outputTemplate,
+      url,
+    ],
+    { logPrefix: "yt-dlp:subs", install: YTDLP_INSTALL },
+  );
+  const vttPath = path.join(dir, `video.${lang}.vtt`);
   try {
     await fs.stat(vttPath);
     return vttPath;

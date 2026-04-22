@@ -104,6 +104,44 @@ body {
   background: var(--color-amber-soft);
 }
 
+/* Hover popup above each transcript word. Hidden by default; fades in on
+   hover with a small delay so dragging the pointer across words to build a
+   selection doesn't flicker popups for every word passed through. */
+.kw-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  color: #ffffff;
+  background: var(--color-blue-strong);
+  border: none;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  z-index: 5;
+}
+.kw:hover > .kw-popup {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 150ms;
+}
+.kw-popup:hover {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
 /* Progress fill — a growing bar anchored to the bottom of the active word. */
 .kw-fill {
   position: absolute;

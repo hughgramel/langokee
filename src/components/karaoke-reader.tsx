@@ -134,6 +134,10 @@ export function KaraokeReader({
   const [clipOpen, setClipOpen] = useState(false);
   /** Segment-level multi-select for concat cards (independent of word drag). */
   const [selectedSegs, setSelectedSegs] = useState<Set<number>>(() => new Set());
+  /** Preselected target word for the next ClipModal open — set by the word-
+   *  hover "Card" popup. Cleared when the user starts a fresh drag
+   *  selection (different intent) or when the modal closes. */
+  const [pendingTargetWord, setPendingTargetWord] = useState<string | null>(null);
 
   useEffect(() => {
     const mq = window.matchMedia("(min-width: 900px)");
@@ -188,6 +192,9 @@ export function KaraokeReader({
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     setSelStart(globalIdx);
     setSelEnd(globalIdx);
+    // A fresh selection invalidates any word-popup target hint — the user
+    // is now building a different clip.
+    setPendingTargetWord(null);
   }, []);
   const onWordPointerEnter = useCallback((globalIdx: number) => {
     if (!draggingRef.current) return;
@@ -253,6 +260,7 @@ export function KaraokeReader({
         sentence,
         words: allWords,
         segments,
+        ...(pendingTargetWord ? { targetWord: pendingTargetWord } : {}),
       };
     }
     if (!selRange) return null;
@@ -273,8 +281,9 @@ export function KaraokeReader({
         lemma: w.lemma,
       })),
       segments: [{ startSec: first.start, endSec: last.end }],
+      ...(pendingTargetWord ? { targetWord: pendingTargetWord } : {}),
     };
-  }, [flat, selRange, selectedSegs, transcript.segments]);
+  }, [flat, selRange, selectedSegs, transcript.segments, pendingTargetWord]);
 
   const clearSelection = useCallback(() => {
     setSelStart(null);
@@ -304,15 +313,38 @@ export function KaraokeReader({
       setSelectedSegs(new Set()); // clear any prior multi-select
       setSelStart(lo);
       setSelEnd(hi);
+      setPendingTargetWord(null);
       setPlaying(false);
       setClipOpen(true);
     },
     [transcript.segments, segOffsets],
   );
 
+  // Word-scoped "Make card" from the hover popup: scope the clip to the
+  // word's enclosing segment (so the card has sentence context) but pre-
+  // select the clicked word as the card's target.
+  const markWordCard = useCallback(
+    (globalIdx: number) => {
+      const w = flat[globalIdx];
+      if (!w) return;
+      const seg = transcript.segments[w.segIdx];
+      if (!seg || seg.words.length === 0) return;
+      const lo = segOffsets[w.segIdx]!;
+      const hi = lo + seg.words.length - 1;
+      setSelectedSegs(new Set());
+      setSelStart(lo);
+      setSelEnd(hi);
+      setPendingTargetWord(w.surface.replace(/[^\p{L}\p{N}]/gu, ""));
+      setPlaying(false);
+      setClipOpen(true);
+    },
+    [flat, transcript.segments, segOffsets],
+  );
+
   // "Make merged card" from the sidebar multi-select toolbar.
   const markMultiCard = useCallback(() => {
     if (selectedSegs.size === 0) return;
+    setPendingTargetWord(null);
     setPlaying(false);
     setClipOpen(true);
   }, [selectedSegs]);
@@ -450,6 +482,7 @@ export function KaraokeReader({
               selectedSegs={selectedSegs}
               onToggleSegSelected={toggleSegSelected}
               onMarkSegmentCard={markSegmentCard}
+              onMarkWordCard={markWordCard}
               onMarkMultiCard={markMultiCard}
               onClearMultiSelect={() => setSelectedSegs(new Set())}
               onWordPointerDown={onWordPointerDown}
@@ -465,7 +498,10 @@ export function KaraokeReader({
       {clipData && (
         <ClipModal
           open={clipOpen}
-          onClose={() => setClipOpen(false)}
+          onClose={() => {
+            setClipOpen(false);
+            setPendingTargetWord(null);
+          }}
           meta={meta}
           clip={clipData}
           playerRef={playerRef}
@@ -714,6 +750,7 @@ function TranscriptPanel({
   selectedSegs,
   onToggleSegSelected,
   onMarkSegmentCard,
+  onMarkWordCard,
   onMarkMultiCard,
   onClearMultiSelect,
   onWordPointerDown,
@@ -732,6 +769,7 @@ function TranscriptPanel({
   selectedSegs: Set<number>;
   onToggleSegSelected: (sIdx: number) => void;
   onMarkSegmentCard: (sIdx: number) => void;
+  onMarkWordCard: (globalIdx: number) => void;
   onMarkMultiCard: () => void;
   onClearMultiSelect: () => void;
   onWordPointerDown: (globalIdx: number, e: React.PointerEvent) => void;
@@ -921,6 +959,18 @@ function TranscriptPanel({
                         }}
                       />
                     )}
+                    <button
+                      type="button"
+                      className="kw-popup"
+                      aria-label={`Make card targeting "${w.surface}"`}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMarkWordCard(globalIdx);
+                      }}
+                    >
+                      <Sparkles size={11} /> Card
+                    </button>
                     {!unspaced && !isLast ? " " : ""}
                   </span>
                 );

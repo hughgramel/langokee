@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Download, Loader2, Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Loader2, Search } from "lucide-react";
 import { Modal } from "./ui/modal";
 import { Button } from "@/components/ui/button";
 import { ErrorCallout, parseApiError, type ApiError } from "./error-callout";
 import { LANGUAGES, type LangCode } from "@/lib/languages";
-import type { VideoMeta } from "@/types/transcript";
 
 type ProbeResult = {
   id: string;
@@ -94,12 +93,13 @@ export function UploadModal({
     if (open && initialUrl) setUrl(initialUrl);
   }, [open, initialUrl]);
 
-  // Clear any stale fetch feedback when the user changes inputs — the
-  // "captions available" / "not available" hint only makes sense for the
-  // (url, language) combo that was last queried.
+  // Clear any stale fetch feedback when the URL changes — a new video
+  // invalidates any previous "loaded / not available" banner. Language
+  // changes no longer reset this since the caption fetch now keys off the
+  // picked subtitle track, not the target language.
   useEffect(() => {
     setFetchState({ kind: "idle" });
-  }, [url, language]);
+  }, [url]);
 
   // Any URL edit invalidates the probe — picker choices only apply to the
   // video we actually probed.
@@ -110,13 +110,44 @@ export function UploadModal({
   }, [url]);
 
   const canSubmit = url.trim().length > 0 && text.trim().length > 0 && !busy;
-  const canFetch =
-    url.trim().length > 0 && !busy && fetchState.kind !== "loading";
 
   const submit = () => {
     if (!canSubmit) return;
     onSubmit({ url: url.trim(), language, text, picks });
   };
+
+  // Caption fetch for a specific (lang, kind). Kept as a standalone callback
+  // so the post-probe effect and the subtitle-pick-change effect can both
+  // invoke it without duplicating the fetch logic.
+  const loadCaptions = useCallback(
+    async (videoId: string, lang: string, kind: "manual" | "auto") => {
+      setFetchState({ kind: "loading" });
+      try {
+        const res = await fetch("/api/captions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ url: url.trim(), videoId, language: lang, kind }),
+        });
+        if (res.status === 404) {
+          setFetchState({ kind: "not-found" });
+          return;
+        }
+        if (!res.ok) {
+          setFetchState({ kind: "error", apiError: await parseApiError(res) });
+          return;
+        }
+        const { text: captionText } = (await res.json()) as { text: string };
+        setText(captionText);
+        setFetchState({ kind: "found" });
+      } catch (err) {
+        setFetchState({
+          kind: "error",
+          apiError: { message: err instanceof Error ? err.message : String(err) },
+        });
+      }
+    },
+    [url],
+  );
 
   const runProbe = async () => {
     if (!url.trim()) return;
@@ -134,6 +165,20 @@ export function UploadModal({
       }
       const result = (await res.json()) as ProbeResult;
       setProbe(result);
+      // Seed the picker with a sensible default subtitle pick so the
+      // caption-fetch effect below fires immediately instead of waiting on
+      // the user to explicitly touch the picker. Prefer manual for the
+      // target language, then auto for the target language, then first
+      // manual track, then first auto track.
+      const base = language.slice(0, 2).toLowerCase();
+      const defaultSub =
+        result.manualSubtitles.find((l) => l.toLowerCase().startsWith(base)) ??
+        result.autoSubtitles.find((l) => l.toLowerCase().startsWith(base)) ??
+        result.manualSubtitles[0] ??
+        result.autoSubtitles[0];
+      if (defaultSub) {
+        setPicks((p) => ({ ...p, subtitleLanguages: [defaultSub] }));
+      }
     } catch (err) {
       setProbeError({ message: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -141,45 +186,39 @@ export function UploadModal({
     }
   };
 
-  const fetchCaptions = async () => {
-    setFetchState({ kind: "loading" });
-    try {
-      // Ingest first: captions live on disk alongside the video, written by
-      // yt-dlp during download. If we've never fetched this URL, we have
-      // nothing to parse. ingest is idempotent for cached videos, so the
-      // second call on history re-opens is effectively free.
-      const ingestRes = await fetch("/api/ingest", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: url.trim(), ...picks }),
-      });
-      if (!ingestRes.ok) {
-        setFetchState({ kind: "error", apiError: await parseApiError(ingestRes) });
-        return;
-      }
-      const meta = (await ingestRes.json()) as VideoMeta;
+  // Auto-fetch captions whenever the user has a probe + a picked subtitle
+  // track. Covers both "probe just finished with a smart default" and
+  // "user switched to a different subtitle lang in the picker". We derive
+  // manual-vs-auto kind from the probe result so the caption API knows
+  // which yt-dlp flag to pass.
+  const pickedSubLang = picks.subtitleLanguages?.[0];
+  useEffect(() => {
+    if (!probe || !pickedSubLang) return;
+    const kind: "manual" | "auto" = probe.manualSubtitles.includes(pickedSubLang)
+      ? "manual"
+      : "auto";
+    void loadCaptions(probe.id, pickedSubLang, kind);
+  }, [probe, pickedSubLang, loadCaptions]);
 
-      const capRes = await fetch(
-        `/api/captions?videoId=${encodeURIComponent(meta.videoId)}&language=${encodeURIComponent(language)}`,
-      );
-      if (capRes.status === 404) {
-        setFetchState({ kind: "not-found" });
+  // Keep the target language in sync with the picked tracks. Audio wins over
+  // subtitles because alignment runs against the audio waveform — for a
+  // Spanish-dubbed English video, we want wav2vec2's Spanish model even if
+  // the user pulled English subtitles for cross-reference. Falls back to the
+  // subtitle lang when there's no audio pick.
+  useEffect(() => {
+    if (!probe) return;
+    const candidates = [picks.audioLanguage, picks.subtitleLanguages?.[0]].filter(
+      (x): x is string => typeof x === "string" && x.length > 0,
+    );
+    for (const cand of candidates) {
+      const base = cand.slice(0, 2).toLowerCase();
+      const match = LANGUAGES.find((l) => l.code === base);
+      if (match) {
+        setLanguage(match.code);
         return;
       }
-      if (!capRes.ok) {
-        setFetchState({ kind: "error", apiError: await parseApiError(capRes) });
-        return;
-      }
-      const { text: captionText } = (await capRes.json()) as { text: string };
-      setText(captionText);
-      setFetchState({ kind: "found" });
-    } catch (err) {
-      setFetchState({
-        kind: "error",
-        apiError: { message: err instanceof Error ? err.message : String(err) },
-      });
     }
-  };
+  }, [probe, picks.audioLanguage, picks.subtitleLanguages]);
 
   const canProbe = url.trim().length > 0 && !busy && !probing;
 
@@ -212,7 +251,7 @@ export function UploadModal({
                 </>
               ) : (
                 <>
-                  <Search size={14} /> Check available tracks
+                  <Search size={14} /> Check tracks &amp; load captions
                 </>
               )}
             </Button>
@@ -265,19 +304,14 @@ export function UploadModal({
             <span className="text-sm" style={{ fontWeight: 700, color: "var(--color-ink)" }}>
               Lyrics or transcript
             </span>
-            <span data-testid="fetch-captions">
-              <Button variant="ghost" size="sm" onClick={fetchCaptions} disabled={!canFetch}>
-                {fetchState.kind === "loading" ? (
-                  <>
-                    <Loader2 size={14} className="animate-spin" /> Fetching…
-                  </>
-                ) : (
-                  <>
-                    <Download size={14} /> Fetch captions
-                  </>
-                )}
-              </Button>
-            </span>
+            {fetchState.kind === "loading" && (
+              <span
+                className="flex items-center gap-1 text-xs"
+                style={{ color: "var(--color-muted)", fontFamily: "var(--font-ui)" }}
+              >
+                <Loader2 size={12} className="animate-spin" /> Loading captions…
+              </span>
+            )}
           </div>
           <textarea
             value={text}
