@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { History as HistoryIcon } from "lucide-react";
 import { PlayerCard } from "@/components/player-card";
 import { UploadModal, type UploadFormValues } from "@/components/upload-modal";
+import { parseApiError, type ApiError } from "@/components/error-callout";
 import { HistoryModal } from "@/components/history-modal";
 import { SettingsModal } from "@/components/settings-modal";
 import { Button } from "@/components/ui/button";
@@ -32,12 +33,20 @@ const KaraokeReader = dynamic(
  * user doesn't have to re-paste text they already aligned. A cache miss
  * reopens the modal with the URL / language prefilled.
  */
+/** Coerce anything thrown from a fetch helper into an ApiError for the UI. */
+function toApiError(err: unknown): ApiError {
+  if (err && typeof err === "object" && "message" in err && typeof (err as ApiError).message === "string") {
+    return err as ApiError;
+  }
+  return { message: err instanceof Error ? err.message : String(err) };
+}
+
 export default function HomePage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
   const [loaded, setLoaded] = useState<{ meta: VideoMeta; transcript: Transcript } | null>(null);
   const [prefilledUrl, setPrefilledUrl] = useState<string | null>(null);
 
@@ -48,25 +57,25 @@ export default function HomePage() {
 
   // Shared: download + probe metadata for a given URL. Used by both the
   // fresh-upload path and the history-cache-miss re-paste path.
-  const ingest = useCallback(async (url: string): Promise<VideoMeta> => {
-    const res = await fetch("/api/ingest", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`ingest failed: ${body || res.statusText}`);
-    }
-    return (await res.json()) as VideoMeta;
-  }, []);
+  const ingest = useCallback(
+    async (url: string, picks?: UploadFormValues["picks"]): Promise<VideoMeta> => {
+      const res = await fetch("/api/ingest", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url, ...(picks ?? {}) }),
+      });
+      if (!res.ok) throw await parseApiError(res);
+      return (await res.json()) as VideoMeta;
+    },
+    [],
+  );
 
   const submit = useCallback(
     async (values: UploadFormValues) => {
       setBusy(true);
       setError(null);
       try {
-        const meta = await ingest(values.url);
+        const meta = await ingest(values.url, values.picks);
         const res = await fetch("/api/align", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -76,10 +85,7 @@ export default function HomePage() {
             text: values.text,
           }),
         });
-        if (!res.ok) {
-          const body = await res.text();
-          throw new Error(`align failed: ${body || res.statusText}`);
-        }
+        if (!res.ok) throw await parseApiError(res);
         const transcript: Transcript = await res.json();
 
         addToHistory({
@@ -97,7 +103,7 @@ export default function HomePage() {
         setHistoryOpen(false);
         setPrefilledUrl(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(toApiError(err));
       } finally {
         setBusy(false);
       }
@@ -129,7 +135,7 @@ export default function HomePage() {
         setHistoryOpen(false);
         setModalOpen(true);
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(toApiError(err));
       } finally {
         setBusy(false);
       }

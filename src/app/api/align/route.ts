@@ -20,6 +20,7 @@ import path from "node:path";
 import { align } from "@/lib/align";
 import { normalizeText } from "@/lib/normalize-text";
 import { mediaDir } from "@/lib/paths";
+import { apiErrorResponse } from "@/lib/api-error";
 import type { Transcript } from "@/types/transcript";
 
 export const runtime = "nodejs";
@@ -65,8 +66,7 @@ export async function POST(req: Request) {
   try {
     transcript = await align(videoId, language, normalized);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiErrorResponse(err);
   }
 
   await fs.writeFile(cachePath, JSON.stringify(transcript, null, 2));

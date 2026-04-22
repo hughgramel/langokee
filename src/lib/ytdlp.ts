@@ -17,10 +17,126 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { run } from "./proc";
+import { spawn } from "node:child_process";
+import { run, ToolMissingError } from "./proc";
 import { mediaDir } from "./paths";
 
 const YTDLP = process.env.YTDLP_BIN || "yt-dlp";
+/** Shown to users when the yt-dlp binary is missing. Platform-agnostic one-
+ *  liner — `pip install` works on every OS, `brew` is faster on macOS. */
+const YTDLP_INSTALL =
+  "brew install yt-dlp (macOS) · pip install -U yt-dlp · https://github.com/yt-dlp/yt-dlp#installation";
+
+/**
+ * Probe result from `yt-dlp -J` (dump-json, no download). Surfaces the
+ * picker-relevant slices of the info dict so the import UI can offer a
+ * track-selection step before committing to a download.
+ */
+export type ProbeResult = {
+  id: string;
+  title: string;
+  duration: number;
+  uploader?: string;
+  thumbnail?: string;
+  /** Distinct video heights available, sorted descending. */
+  videoHeights: number[];
+  /** Audio track languages yt-dlp detected (multi-language dubs). */
+  audioLanguages: string[];
+  /** Human-uploaded subtitle langs. */
+  manualSubtitles: string[];
+  /** YouTube-generated ASR subtitle langs. */
+  autoSubtitles: string[];
+};
+
+type RawFormat = {
+  vcodec?: string;
+  acodec?: string;
+  height?: number;
+  language?: string | null;
+};
+
+type RawInfo = {
+  id: string;
+  title: string;
+  duration: number;
+  uploader?: string;
+  thumbnail?: string;
+  formats?: RawFormat[];
+  subtitles?: Record<string, unknown>;
+  automatic_captions?: Record<string, unknown>;
+};
+
+/**
+ * Run `yt-dlp -J <url>` to dump the full info dict without downloading.
+ * We can't use `run()` here because we need stdout — the shared helper
+ * only streams to the logger.
+ */
+async function ytDlpJson(url: string): Promise<RawInfo> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(YTDLP, ["--no-playlist", "--no-warnings", "-J", url]);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (b: Buffer) => {
+      stdout += b.toString("utf8");
+    });
+    child.stderr.on("data", (b: Buffer) => {
+      stderr += b.toString("utf8");
+    });
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") {
+        reject(new ToolMissingError("yt-dlp", YTDLP_INSTALL));
+      } else {
+        reject(err);
+      }
+    });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`yt-dlp probe failed (${code}): ${stderr.trim()}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as RawInfo);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+export async function probeVideo(url: string): Promise<ProbeResult> {
+  const info = await ytDlpJson(url);
+  const heights = new Set<number>();
+  const langs = new Set<string>();
+  for (const f of info.formats ?? []) {
+    if (f.vcodec && f.vcodec !== "none" && typeof f.height === "number") {
+      heights.add(f.height);
+    }
+    if (f.acodec && f.acodec !== "none" && f.language) {
+      langs.add(f.language);
+    }
+  }
+  return {
+    id: info.id,
+    title: info.title,
+    duration: info.duration,
+    uploader: info.uploader,
+    thumbnail: info.thumbnail,
+    videoHeights: [...heights].sort((a, b) => b - a),
+    audioLanguages: [...langs].sort(),
+    manualSubtitles: info.subtitles ? Object.keys(info.subtitles) : [],
+    autoSubtitles: info.automatic_captions ? Object.keys(info.automatic_captions) : [],
+  };
+}
+
+/** User's picks at import time. All optional — absent fields mean "default". */
+export type DownloadOptions = {
+  /** Maximum video height (e.g. 720). Hardcap; yt-dlp picks best ≤ this. */
+  maxHeight?: number;
+  /** Audio track language (for videos with multiple dubs). */
+  audioLanguage?: string;
+  /** Only fetch these subtitle langs instead of "all". Empty → skip subs. */
+  subtitleLanguages?: string[];
+};
 
 export type YtDlpInfo = {
   id: string;
@@ -82,11 +198,34 @@ export async function findManualSubtitle(
   }
 }
 
-export async function downloadVideo(url: string, videoId: string): Promise<YtDlpInfo> {
+export async function downloadVideo(
+  url: string,
+  videoId: string,
+  opts: DownloadOptions = {},
+): Promise<YtDlpInfo> {
   const dir = mediaDir(videoId);
   await fs.mkdir(dir, { recursive: true });
 
   const outputTemplate = path.join(dir, "video.%(ext)s");
+  const maxH = opts.maxHeight ?? 720;
+  // Audio-language filter is appended to the `ba*` selector when the user
+  // picked a dub — yt-dlp's [language=X] filter on audio formats restricts
+  // to matching tracks, then falls through to the default if none.
+  const audioFilter = opts.audioLanguage ? `[language=${opts.audioLanguage}]` : "";
+  const format =
+    `bv*[height<=${maxH}][vcodec^=avc1]+ba${audioFilter}[acodec^=mp4a]/` +
+    `bv*[height<=${maxH}][ext=mp4]+ba${audioFilter}[ext=m4a]/` +
+    `bv*[height<=${maxH}]+ba${audioFilter}/` +
+    `b[height<=${maxH}][ext=mp4]/b[height<=${maxH}]/b`;
+  // Subtitles: "all" by default (cheap on most videos). When caller passes
+  // an explicit list, use that; empty list means skip subs entirely.
+  const subLangs = opts.subtitleLanguages;
+  const subtitleArgs: string[] =
+    subLangs === undefined
+      ? ["--write-subs", "--sub-format", "vtt", "--sub-langs", "all"]
+      : subLangs.length === 0
+        ? []
+        : ["--write-subs", "--sub-format", "vtt", "--sub-langs", subLangs.join(",")];
 
   await run(
     YTDLP,
@@ -94,31 +233,21 @@ export async function downloadVideo(url: string, videoId: string): Promise<YtDlp
       "--no-playlist",
       "--no-warnings",
       "-f",
-      // Prefer H.264 + AAC explicitly: Chrome's AV1 demuxer has known
+      // H.264 + AAC preferred explicitly: Chrome's AV1 demuxer has known
       // muxing issues in MP4 containers that silently drop the audio track
       // (readyState=4, paused=false, but webkitAudioDecodedByteCount=0).
       // Falling back through progressively more lenient options keeps
       // videos that only ship a single combined stream working.
-      "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]/b",
+      format,
       "--merge-output-format",
       "mp4",
       "--write-info-json",
-      // Captions: grab only manually-uploaded tracks. Auto-captions are
-      // YouTube's own ASR, which reintroduces the hallucinations we
-      // built around avoiding — and requesting them triggers aggressive
-      // rate limiting on popular uploads (YouTube advertises auto-
-      // translated tracks for every language it supports, 50+ files per
-      // video). Manual subs alone are small and rarely throttled.
-      "--write-subs",
-      "--sub-format",
-      "vtt",
-      "--sub-langs",
-      "all",
+      ...subtitleArgs,
       "-o",
       outputTemplate,
       url,
     ],
-    { logPrefix: "yt-dlp" },
+    { logPrefix: "yt-dlp", install: YTDLP_INSTALL },
   );
 
   const infoPath = path.join(dir, "video.info.json");

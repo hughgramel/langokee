@@ -5,6 +5,7 @@ import { Loader2, Camera } from "lucide-react";
 import type ReactPlayerType from "react-player";
 import { Modal } from "./ui/modal";
 import { Button } from "@/components/ui/button";
+import { ErrorCallout, parseApiError, type ApiError } from "./error-callout";
 import type { VideoMeta, Word } from "@/types/transcript";
 
 const FIELD_LABEL: React.CSSProperties = {
@@ -26,10 +27,15 @@ const INPUT_STYLE: React.CSSProperties = {
 };
 
 export type ClipDraft = {
+  /** Start of the first segment — used for seeking and the screenshot frame. */
   startSec: number;
+  /** End of the last segment — display only. */
   endSec: number;
   sentence: string;
   words: Word[];
+  /** Always populated. Length 1 → single-range card; length > 1 → concat card
+   *  that the backend merges into a single MP3 via ffmpeg filter_complex. */
+  segments: { startSec: number; endSec: number }[];
 };
 
 /**
@@ -63,7 +69,7 @@ export function ClipModal({
   const [definition, setDefinition] = useState("");
   const [busy, setBusy] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
 
   // Default target word = longest content word in the selection. Usually
   // matches the word the user actually cares about.
@@ -83,9 +89,10 @@ export function ClipModal({
     // For a local MP4 source, react-player wraps a plain <video>.
     const video = internal instanceof HTMLVideoElement ? internal : null;
     if (!video) {
-      setError(
-        "Screenshot unavailable — this usually means the video is streaming from YouTube instead of a local MP4. Check ingest logs.",
-      );
+      setError({
+        message:
+          "Screenshot unavailable — this usually means the video is streaming from YouTube instead of a local MP4. Check ingest logs.",
+      });
       return;
     }
     const canvas = document.createElement("canvas");
@@ -143,23 +150,28 @@ export function ClipModal({
           title: meta.title,
           channel: meta.channel,
           language,
-          startSec: clip.startSec,
-          endSec: clip.endSec,
+          // Multi-segment concat when length > 1; single range otherwise.
+          // The backend accepts both shapes and picks clipAudio vs concat.
+          segments: clip.segments,
           sentence: clip.sentence,
           words: clip.words,
           targetWord,
           translation,
           definition,
+          // Prefer server-side frame extraction (cached on disk keyed by
+          // timestamp). Canvas capture is sent as fallback for callers
+          // where the video isn't locally cached.
+          screenshotSec: clip.startSec,
           screenshotDataUrl: screenshot,
         }),
       });
       if (!res.ok) {
-        const body = await res.text();
-        throw new Error(body || res.statusText);
+        setError(await parseApiError(res));
+        return;
       }
       setSuccess(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError({ message: err instanceof Error ? err.message : String(err) });
     } finally {
       setBusy(false);
     }
@@ -207,7 +219,19 @@ export function ClipModal({
                 fontVariantNumeric: "tabular-nums",
               }}
             >
-              {clip.startSec.toFixed(2)}s → {clip.endSec.toFixed(2)}s
+              {clip.segments.length > 1 ? (
+                <>
+                  {clip.segments.length} segments ·{" "}
+                  {clip.segments
+                    .reduce((acc, s) => acc + (s.endSec - s.startSec), 0)
+                    .toFixed(2)}
+                  s merged
+                </>
+              ) : (
+                <>
+                  {clip.startSec.toFixed(2)}s → {clip.endSec.toFixed(2)}s
+                </>
+              )}
             </div>
           </div>
 
@@ -280,19 +304,7 @@ export function ClipModal({
             />
           </label>
 
-          {error && (
-            <div
-              className="px-3 py-2 text-sm"
-              style={{
-                background: "var(--color-coral-soft)",
-                color: "var(--color-coral)",
-                border: "1px solid var(--color-coral)",
-                borderRadius: "var(--radius-sm)",
-              }}
-            >
-              {error}
-            </div>
-          )}
+          {error && <ErrorCallout error={error} />}
 
           <div className="mt-2 flex items-center justify-end gap-3">
             <Button variant="ghost" size="md" onClick={onClose} disabled={busy}>

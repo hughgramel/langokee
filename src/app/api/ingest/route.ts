@@ -13,23 +13,37 @@ import { NextResponse } from "next/server";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { extractVideoId } from "@/lib/youtube-id";
-import { downloadVideo } from "@/lib/ytdlp";
+import { downloadVideo, type DownloadOptions } from "@/lib/ytdlp";
 import { extractAudio } from "@/lib/ffmpeg";
 import { mediaDir, mediaUrl } from "@/lib/paths";
+import { apiErrorResponse } from "@/lib/api-error";
 import type { VideoMeta } from "@/types/transcript";
 
 // Force Node runtime — we spawn external binaries.
 export const runtime = "nodejs";
 
+type IngestBody = {
+  url?: string;
+  /** yt-dlp picker choices from /api/probe. All optional. */
+  maxHeight?: number;
+  audioLanguage?: string;
+  subtitleLanguages?: string[];
+};
+
 export async function POST(req: Request) {
-  let body: { url?: string };
+  let body: IngestBody;
   try {
-    body = (await req.json()) as { url?: string };
+    body = (await req.json()) as IngestBody;
   } catch {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
   const url = body.url?.trim();
   if (!url) return NextResponse.json({ error: "missing url" }, { status: 400 });
+  const dlOpts: DownloadOptions = {
+    maxHeight: body.maxHeight,
+    audioLanguage: body.audioLanguage,
+    subtitleLanguages: body.subtitleLanguages,
+  };
 
   const videoId = extractVideoId(url);
   if (!videoId) {
@@ -49,14 +63,13 @@ export async function POST(req: Request) {
 
   try {
     if (!haveVideo || !haveInfo) {
-      await downloadVideo(url, videoId);
+      await downloadVideo(url, videoId, dlOpts);
     }
     if (!haveAudio) {
       await extractAudio(videoId);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return apiErrorResponse(err);
   }
 
   const infoRaw = await fs.readFile(infoPath, "utf8");

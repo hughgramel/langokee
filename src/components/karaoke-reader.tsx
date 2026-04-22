@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type ReactPlayerType from "react-player";
-import { PanelRight, PanelRightClose } from "lucide-react";
+import { PanelRight, PanelRightClose, Sparkles, X } from "lucide-react";
 import {
   ReactPlayer,
   type ReactPlayerProgressState,
 } from "./react-player-wrapper";
-import { ClipModal } from "./clip-modal";
+import { ClipModal, type ClipDraft } from "./clip-modal";
 import { RubyWord } from "./ruby-word";
 import { Button } from "@/components/ui/button";
 import {
@@ -132,6 +132,8 @@ export function KaraokeReader({
   const [selStart, setSelStart] = useState<number | null>(null);
   const [selEnd, setSelEnd] = useState<number | null>(null);
   const [clipOpen, setClipOpen] = useState(false);
+  /** Segment-level multi-select for concat cards (independent of word drag). */
+  const [selectedSegs, setSelectedSegs] = useState<Set<number>>(() => new Set());
 
   useEffect(() => {
     const mq = window.matchMedia("(min-width: 900px)");
@@ -215,7 +217,44 @@ export function KaraokeReader({
     return { lo, hi };
   }, [selStart, selEnd]);
 
-  const clipData = useMemo(() => {
+  /**
+   * Active clip for the modal. Priority order:
+   *   1. Segment-level multi-select (from sidebar checkboxes) — becomes a
+   *      concat card spanning N disjoint ranges.
+   *   2. Word-range drag selection — classic single-range card.
+   *
+   * Both surface as the same ClipDraft shape (always a `segments` array);
+   * the API picks clipAudio vs clipAudioConcat based on length.
+   */
+  const clipData = useMemo<ClipDraft | null>(() => {
+    // Multi-segment path first: any checked segments wins over drag-select.
+    if (selectedSegs.size > 0) {
+      const sorted = [...selectedSegs].sort((a, b) => a - b);
+      const pieces = sorted
+        .map((sIdx) => transcript.segments[sIdx])
+        .filter((s): s is Segment => Boolean(s) && s.words.length > 0);
+      if (pieces.length === 0) return null;
+      const segments = pieces.map((s) => ({
+        startSec: s.words[0]!.start,
+        endSec: s.words[s.words.length - 1]!.end,
+      }));
+      const allWords: Word[] = pieces.flatMap((s) =>
+        s.words.map((w) => ({
+          surface: w.surface,
+          start: w.start,
+          end: w.end,
+          lemma: w.lemma,
+        })),
+      );
+      const sentence = pieces.map((s) => s.words.map((w) => w.surface).join(" ")).join(" / ");
+      return {
+        startSec: segments[0]!.startSec,
+        endSec: segments[segments.length - 1]!.endSec,
+        sentence,
+        words: allWords,
+        segments,
+      };
+    }
     if (!selRange) return null;
     const { lo, hi } = selRange;
     if (hi <= lo) return null;
@@ -233,13 +272,50 @@ export function KaraokeReader({
         end: w.end,
         lemma: w.lemma,
       })),
+      segments: [{ startSec: first.start, endSec: last.end }],
     };
-  }, [flat, selRange]);
+  }, [flat, selRange, selectedSegs, transcript.segments]);
 
   const clearSelection = useCallback(() => {
     setSelStart(null);
     setSelEnd(null);
+    setSelectedSegs(new Set());
   }, []);
+
+  const toggleSegSelected = useCallback((sIdx: number) => {
+    setSelectedSegs((prev) => {
+      const next = new Set(prev);
+      if (next.has(sIdx)) next.delete(sIdx);
+      else next.add(sIdx);
+      return next;
+    });
+  }, []);
+
+  // Open ClipModal for a single segment — called from the sidebar per-row
+  // "Mark card" button and the video hover button. Deliberately does NOT
+  // touch selectedSegs: the multi-select gesture is separate from "quickly
+  // card this one", and polluting the checkbox state would surprise users.
+  const markSegmentCard = useCallback(
+    (sIdx: number) => {
+      const seg = transcript.segments[sIdx];
+      if (!seg || seg.words.length === 0) return;
+      const lo = segOffsets[sIdx]!;
+      const hi = lo + seg.words.length - 1;
+      setSelectedSegs(new Set()); // clear any prior multi-select
+      setSelStart(lo);
+      setSelEnd(hi);
+      setPlaying(false);
+      setClipOpen(true);
+    },
+    [transcript.segments, segOffsets],
+  );
+
+  // "Make merged card" from the sidebar multi-select toolbar.
+  const markMultiCard = useCallback(() => {
+    if (selectedSegs.size === 0) return;
+    setPlaying(false);
+    setClipOpen(true);
+  }, [selectedSegs]);
 
   return (
     <div className="flex flex-1 flex-col gap-4">
@@ -274,6 +350,11 @@ export function KaraokeReader({
             }
             settings={settings}
             language={transcript.language}
+            onMarkCurrentSegment={
+              activeIdx >= 0
+                ? () => markSegmentCard(flat[activeIdx]!.segIdx)
+                : null
+            }
           />
 
           <Scrubber currentTime={currentSec} duration={duration} onSeek={seek} />
@@ -318,7 +399,7 @@ export function KaraokeReader({
                 Make Anki card
               </Button>
             </span>
-            {selRange && (
+            {(selRange || selectedSegs.size > 0) && (
               <Button variant="ghost" size="md" onClick={clearSelection}>
                 Clear
               </Button>
@@ -366,6 +447,11 @@ export function KaraokeReader({
               currentSec={currentSec}
               settings={settings}
               selRange={selRange}
+              selectedSegs={selectedSegs}
+              onToggleSegSelected={toggleSegSelected}
+              onMarkSegmentCard={markSegmentCard}
+              onMarkMultiCard={markMultiCard}
+              onClearMultiSelect={() => setSelectedSegs(new Set())}
               onWordPointerDown={onWordPointerDown}
               onWordPointerEnter={onWordPointerEnter}
               onWordPointerUp={onWordPointerUp}
@@ -405,6 +491,7 @@ function VideoCard({
   overlayActiveWordIdx,
   settings,
   language,
+  onMarkCurrentSegment,
 }: {
   videoUrl: string;
   playerRef: React.RefObject<ReactPlayerType | null>;
@@ -418,6 +505,9 @@ function VideoCard({
   overlayActiveWordIdx: number;
   settings: ReaderSettings;
   language: string;
+  /** Card the currently-playing segment. Null until we know which segment
+   *  the clock is inside — e.g. before first play on an unstarted video. */
+  onMarkCurrentSegment: (() => void) | null;
 }) {
   const unspaced = isUnspacedLanguage(language);
   const activeInline = activeWordInlineStyle(settings);
@@ -427,7 +517,7 @@ function VideoCard({
   const overlayFontSize = settings.fontSize + 5;
   return (
     <div
-      className="relative w-full overflow-hidden"
+      className="video-wrapper relative w-full overflow-hidden"
       style={{
         aspectRatio: "16 / 9",
         background: "#000",
@@ -435,6 +525,34 @@ function VideoCard({
         borderRadius: "var(--radius)",
       }}
     >
+      {onMarkCurrentSegment && (
+        <button
+          type="button"
+          className="video-hover-btn"
+          onClick={onMarkCurrentSegment}
+          aria-label="Mark current segment as card"
+          style={{
+            position: "absolute",
+            top: 12,
+            right: 12,
+            zIndex: 3,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "6px 10px",
+            borderRadius: "var(--radius-sm)",
+            background: "rgba(0,0,0,0.72)",
+            color: "#fff",
+            fontFamily: "var(--font-ui)",
+            fontWeight: 700,
+            fontSize: 12,
+            border: "1px solid rgba(255,255,255,0.24)",
+            cursor: "pointer",
+          }}
+        >
+          <Sparkles size={14} /> Mark card
+        </button>
+      )}
       <ReactPlayer
         playerRef={playerRef}
         url={videoUrl}
@@ -593,6 +711,11 @@ function TranscriptPanel({
   currentSec,
   settings,
   selRange,
+  selectedSegs,
+  onToggleSegSelected,
+  onMarkSegmentCard,
+  onMarkMultiCard,
+  onClearMultiSelect,
   onWordPointerDown,
   onWordPointerEnter,
   onWordPointerUp,
@@ -606,6 +729,11 @@ function TranscriptPanel({
   currentSec: number;
   settings: ReaderSettings;
   selRange: { lo: number; hi: number } | null;
+  selectedSegs: Set<number>;
+  onToggleSegSelected: (sIdx: number) => void;
+  onMarkSegmentCard: (sIdx: number) => void;
+  onMarkMultiCard: () => void;
+  onClearMultiSelect: () => void;
   onWordPointerDown: (globalIdx: number, e: React.PointerEvent) => void;
   onWordPointerEnter: (globalIdx: number) => void;
   onWordPointerUp: (globalIdx: number) => void;
@@ -639,47 +767,117 @@ function TranscriptPanel({
   const activeInline = activeWordInlineStyle(settings);
   const showBar = settings.activeStyle === "underline";
 
+  const multiCount = selectedSegs.size;
+
   return (
-    <div
-      ref={scrollRef}
-      className="flex-1 overflow-y-auto p-3"
-      style={{
-        fontFamily: "var(--font-ui)",
-        fontSize: settings.fontSize,
-        color: "var(--color-ink)",
-        lineHeight: 1.7,
-      }}
-    >
+    <div className="flex flex-1 flex-col overflow-hidden">
+      {multiCount > 0 && (
+        <div
+          className="flex items-center gap-2 px-3 py-2"
+          style={{
+            borderBottom: "1px solid var(--color-line)",
+            background: "var(--color-blue-soft)",
+            fontFamily: "var(--font-ui)",
+          }}
+        >
+          <span className="text-sm" style={{ fontWeight: 700, color: "var(--color-blue-ink)" }}>
+            {multiCount} segment{multiCount === 1 ? "" : "s"}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button variant="primary" size="sm" onClick={onMarkMultiCard}>
+              <Sparkles size={14} /> Make merged card
+            </Button>
+            <Button variant="ghost" size="sm" onClick={onClearMultiSelect}>
+              <X size={14} />
+            </Button>
+          </div>
+        </div>
+      )}
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto p-3"
+        style={{
+          fontFamily: "var(--font-ui)",
+          fontSize: settings.fontSize,
+          color: "var(--color-ink)",
+          lineHeight: 1.7,
+        }}
+      >
       {segments.map((seg, sIdx) => {
         const isActive = sIdx === activeSegIdx;
+        const isChecked = selectedSegs.has(sIdx);
         return (
           <div
             key={sIdx}
             data-seg-idx={sIdx}
-            className="mb-2 p-2"
+            className="segment-row mb-2 flex gap-2 p-2"
             style={{
               background: isActive ? "var(--color-blue-soft)" : "transparent",
               borderRadius: "var(--radius-sm)",
               transition: "background 0.15s",
             }}
           >
-            <button
-              onClick={() => onSeekSegment(seg.start)}
-              className="mb-1 block text-xs"
-              style={{
-                fontFamily: "var(--font-ui)",
-                fontWeight: 700,
-                color: "var(--color-muted)",
-                fontVariantNumeric: "tabular-nums",
-                background: "none",
-                border: "none",
-                padding: 0,
-                cursor: "pointer",
-              }}
+            <div
+              style={{ width: 20, flexShrink: 0, paddingTop: 4 }}
+              aria-hidden={!isChecked ? "true" : undefined}
             >
-              {formatTime(seg.start)}
-            </button>
-            <div style={{ userSelect: "none" }}>
+              <input
+                type="checkbox"
+                className="segment-check"
+                data-checked={isChecked ? "true" : undefined}
+                checked={isChecked}
+                onChange={() => onToggleSegSelected(sIdx)}
+                aria-label={`Select segment at ${formatTime(seg.start)}`}
+                style={{
+                  width: 16,
+                  height: 16,
+                  cursor: "pointer",
+                  accentColor: "var(--color-blue-strong)",
+                }}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="mb-1 flex items-center">
+                <button
+                  onClick={() => onSeekSegment(seg.start)}
+                  className="text-xs"
+                  style={{
+                    fontFamily: "var(--font-ui)",
+                    fontWeight: 700,
+                    color: "var(--color-muted)",
+                    fontVariantNumeric: "tabular-nums",
+                    background: "none",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                  }}
+                >
+                  {formatTime(seg.start)}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onMarkSegmentCard(sIdx)}
+                  className="segment-mark ml-auto"
+                  aria-label="Mark segment as card"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: "2px 6px",
+                    fontSize: 11,
+                    fontFamily: "var(--font-ui)",
+                    fontWeight: 700,
+                    color: "var(--color-blue-ink)",
+                    background: "#ffffff",
+                    border: "1px solid var(--color-blue-strong)",
+                    borderRadius: "var(--radius-sm)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Sparkles size={12} /> Card
+                </button>
+              </div>
+              <div style={{ userSelect: "none" }}>
               {seg.words.map((w, wi) => {
                 const globalIdx = segOffsets[sIdx]! + wi;
                 const isActiveWord = globalIdx === activeIdx;
@@ -727,10 +925,12 @@ function TranscriptPanel({
                   </span>
                 );
               })}
+              </div>
             </div>
           </div>
         );
       })}
+      </div>
     </div>
   );
 }

@@ -19,6 +19,8 @@ import type { Transcript } from "@/types/transcript";
 
 const ALIGN_PYTHON = process.env.ALIGN_PYTHON || "python3";
 const ALIGN_DEVICE = process.env.ALIGN_DEVICE || "cpu";
+const ALIGN_INSTALL =
+  "Set ALIGN_PYTHON in .env.local to a Python interpreter with whisperx installed (python3 -m venv .venv && .venv/bin/pip install whisperx).";
 
 // scripts/align.py is read from the repo root — process.cwd() when Next.js
 // runs is the project root, same convention the other shell-outs use.
@@ -54,7 +56,7 @@ export async function align(
         "--device",
         ALIGN_DEVICE,
       ],
-      { logPrefix: "align" },
+      { logPrefix: "align", install: ALIGN_INSTALL },
     );
     // align.py writes a single JSON document to stdout.
     return JSON.parse(stdout) as Transcript;

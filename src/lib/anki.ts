@@ -19,15 +19,43 @@ const MODEL_NAME = process.env.ANKI_MODEL_NAME || "Timestamp Sentence";
 const DECK_NAME = process.env.ANKI_DECK_NAME || "Timestamp";
 const SCREENSHOT_FIELD = "Screenshot";
 
+const ANKI_INSTALL =
+  "Install Anki (https://apps.ankiweb.net) and the AnkiConnect add-on (https://ankiweb.net/shared/info/2055492159), then restart Anki with it running in the background.";
+
 type AnkiResp<T> = { result: T; error: string | null };
+
+/**
+ * Thrown when AnkiConnect is unreachable — typically because Anki isn't
+ * running or the add-on isn't installed. Carries an install hint that the
+ * API routes surface to the UI via the `ANKI_DOWN:` message prefix.
+ */
+export class AnkiDownError extends Error {
+  readonly kind = "anki-down" as const;
+  readonly install = ANKI_INSTALL;
+  constructor(cause?: unknown) {
+    super(
+      `ANKI_DOWN: Can't reach AnkiConnect at ${ANKI_URL}. ${ANKI_INSTALL}` +
+        (cause instanceof Error ? ` (${cause.message})` : ""),
+    );
+    this.name = "AnkiDownError";
+  }
+}
 
 /** Invoke AnkiConnect and throw on error. */
 export async function ankiInvoke<T>(action: string, params: unknown = {}): Promise<T> {
-  const res = await fetch(ANKI_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, version: 6, params }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(ANKI_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, version: 6, params }),
+    });
+  } catch (err) {
+    // fetch throws TypeError on connection refused / DNS failure. We treat
+    // any network-layer failure as "Anki isn't running" since that's the
+    // overwhelming common case for local-only AnkiConnect.
+    throw new AnkiDownError(err);
+  }
   if (!res.ok) {
     throw new Error(`AnkiConnect HTTP ${res.status}: ${await res.text()}`);
   }

@@ -11,12 +11,31 @@ export type ProcResult = {
   stderr: string;
 };
 
+/**
+ * Thrown when a required binary (yt-dlp, ffmpeg, …) isn't on PATH. Carries
+ * the install command so the API route can surface something the user can
+ * actually copy-paste. The UI checks `instanceof ToolMissingError` indirectly
+ * via the error message prefix `"MISSING_BINARY:"`.
+ */
+export class ToolMissingError extends Error {
+  readonly kind = "missing-binary" as const;
+  constructor(
+    public readonly bin: string,
+    public readonly install: string,
+  ) {
+    super(
+      `MISSING_BINARY: ${bin} is not installed or not on PATH. Install it with: ${install}`,
+    );
+    this.name = "ToolMissingError";
+  }
+}
+
 export async function run(
   bin: string,
   args: string[],
-  opts: SpawnOptions & { logPrefix?: string } = {},
+  opts: SpawnOptions & { logPrefix?: string; install?: string } = {},
 ): Promise<ProcResult> {
-  const { logPrefix, ...spawnOpts } = opts;
+  const { logPrefix, install, ...spawnOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { ...spawnOpts, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -29,7 +48,13 @@ export async function run(
       stderr += text;
       if (logPrefix) process.stderr.write(`[${logPrefix}] ${text}`);
     });
-    child.on("error", reject);
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT" && install) {
+        reject(new ToolMissingError(bin, install));
+      } else {
+        reject(err);
+      }
+    });
     child.on("close", (code) => {
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(`${bin} exited with code ${code}\n${stderr}`));

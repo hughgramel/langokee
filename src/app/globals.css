@@ -157,6 +157,30 @@ body {
   font-weight: 800;
 }
 
+/* Hover-reveal UI on the video and sidebar segment rows. The affordances
+   (mark-card button, selection checkbox) reserve their layout space even
+   when hidden, so hover/check state only toggles opacity — no reflow. */
+.video-wrapper .video-hover-btn {
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+.video-wrapper:hover .video-hover-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.segment-row .segment-check,
+.segment-row .segment-mark {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.segment-row:hover .segment-check,
+.segment-row:hover .segment-mark,
+.segment-row .segment-check[data-checked="true"] {
+  opacity: 1;
+}
+
 /* Overlay caption box — anchored at bottom:12% of the video surface. */
 .caption-overlay {
   position: absolute;
