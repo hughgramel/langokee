@@ -144,18 +144,7 @@ export default function HomePage() {
 
   return (
     <main className="mx-auto flex min-h-dvh w-full max-w-[1600px] flex-col px-4 py-6 sm:px-8 sm:py-10">
-      <header className="mb-6 flex items-center justify-between gap-3">
-        <h1
-          className="text-3xl"
-          style={{
-            fontFamily: "var(--font-ui)",
-            fontWeight: 800,
-            letterSpacing: "-0.02em",
-            color: "var(--color-blue-strong)",
-          }}
-        >
-          langokee
-        </h1>
+      <header className="mb-6 flex items-center justify-end gap-3">
         <div className="flex items-center gap-2">
           <span data-testid="history-button">
             <Button variant="ghost" size="md" onClick={() => setHistoryOpen(true)}>
