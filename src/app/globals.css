@@ -1,0 +1,189 @@
+@import "tailwindcss";
+
+/**
+ * Design tokens — ported from the LangoBee design-overhaul branch. Flat
+ * single-blue system, no press-down shadows, 1px border cards, one UI
+ * family (Plus Jakarta Sans) for every hierarchy level. See design.md in
+ * the LangoBee repo for the canonical spec.
+ *
+ * The only bespoke langokee CSS lives at the bottom: reader word spans,
+ * the pinyin ruby layout, and the caption overlay.
+ */
+:root {
+  /* Root surfaces */
+  --background: #fdfdfd;
+  --foreground: #0b0b10;
+
+  /* Ink / neutrals */
+  --color-ink: #0b0b10;
+  --color-ink-2: #2a2a33;
+  --color-muted: #6b7280;
+  --color-muted-2: #9aa0ac;
+  --color-line: #ececf0;
+  --color-surface: #f3f4f8;
+  --color-surface-2: #f5f6fa;
+
+  /* Blues — one strong blue + tints */
+  --color-blue-strong: #1e40ff;
+  --color-blue: #2540d7;
+  --color-blue-soft: #eaeeff;
+  --color-blue-ink: #16248a;
+
+  /* Word highlights (reader) */
+  --color-amber: #fbba00;
+  --color-amber-soft: #ffeba1;
+
+  /* Status accents */
+  --color-mint: #3fd69a;
+  --color-mint-soft: #e6f9f1;
+  --color-coral: #ff7a7a;
+  --color-coral-soft: #ffe7e4;
+
+  /* Shape */
+  --radius: 20px;
+  --radius-lg: 24px;
+  --radius-md: 16px;
+  --radius-sm: 12px;
+
+  /* Font variables — loaded in layout.tsx via next/font/google. Single
+     UI family (Plus Jakarta Sans) for everything. */
+  --font-ui: var(--font-plus-jakarta), system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-ink: var(--color-ink);
+  --color-ink-2: var(--color-ink-2);
+  --color-muted: var(--color-muted);
+  --color-muted-2: var(--color-muted-2);
+  --color-line: var(--color-line);
+  --color-surface: var(--color-surface);
+  --color-surface-2: var(--color-surface-2);
+
+  --color-blue-strong: var(--color-blue-strong);
+  --color-blue: var(--color-blue);
+  --color-blue-soft: var(--color-blue-soft);
+  --color-blue-ink: var(--color-blue-ink);
+
+  --color-amber: var(--color-amber);
+  --color-amber-soft: var(--color-amber-soft);
+  --color-mint: var(--color-mint);
+  --color-mint-soft: var(--color-mint-soft);
+  --color-coral: var(--color-coral);
+  --color-coral-soft: var(--color-coral-soft);
+
+  --font-sans: var(--font-ui);
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-ui);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reader-specific                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Karaoke word span in the transcript. Inline styles from the reader
+   settings override the defaults on the active word. */
+.kw {
+  cursor: pointer;
+  padding: 2px 1px;
+  border-radius: 4px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.kw.selected {
+  background: var(--color-amber-soft);
+}
+
+/* Progress fill — a growing bar anchored to the bottom of the active word. */
+.kw-fill {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 3px;
+  border-radius: 2px;
+  pointer-events: none;
+  transition: width 100ms linear;
+}
+
+/* Ruby layout used for pinyin-over-hanzi (and any future reading-annotated
+   language). Each character is a stacked column: the reading sits above
+   the glyph on its own baseline, so rows don't collide and clicks on the
+   bottom glyph still hit the word span. */
+.ruby-word {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 0;
+  line-height: 1.15;
+  vertical-align: baseline;
+}
+.ruby-char {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 1px;
+}
+.ruby-reading {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 0.55em;
+  color: var(--color-muted);
+  letter-spacing: 0;
+  line-height: 1;
+  margin-bottom: 2px;
+  min-height: 0.7em;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.ruby-char-glyph {
+  line-height: 1.15;
+}
+
+/* When the active-word highlight should extend to the pinyin row, pick up
+   the highlight color from the CSS custom property set on the word span
+   (see karaoke-reader.tsx). This works regardless of active style — even
+   "underline", where the glyph itself isn't recolored. */
+[data-active="true"][data-highlight-pinyin="true"] .ruby-reading {
+  color: var(--pinyin-highlight-color, inherit);
+  font-weight: 800;
+}
+
+/* Overlay caption box — anchored at bottom:12% of the video surface. */
+.caption-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12%;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  padding: 0 12px;
+  z-index: 2;
+}
+.caption-overlay-inner {
+  display: inline-block;
+  max-width: 92%;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  text-align: center;
+  font-family: var(--font-ui);
+  font-size: 22px;
+  line-height: 1.6;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.caption-overlay-inner .ruby-reading {
+  color: rgba(255, 255, 255, 0.82);
+}
