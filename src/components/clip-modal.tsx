@@ -49,10 +49,6 @@ export type ClipDraft = {
   /** Always populated. Length 1 → single-range card; length > 1 → concat card
    *  that the backend merges into a single MP3 via ffmpeg filter_complex. */
   segments: { startSec: number; endSec: number }[];
-  /** Pre-select this target word on open instead of the longest-content-word
-   *  heuristic. Set by the word-hover "Make card" popup so the word the user
-   *  actually clicked becomes the card target. */
-  targetWord?: string;
 };
 
 /**
@@ -89,22 +85,16 @@ export function ClipModal({
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
-  // Target word defaults: an explicit `clip.targetWord` hint (from the word-
-  // hover "Card" popup) wins; otherwise pick the longest content word in
-  // the selection as a reasonable guess.
+  // Target word default: pick the longest content word in the selection as
+  // a reasonable guess. User can change it from the dropdown.
   useEffect(() => {
     if (!open || targetWord) return;
-    const hinted = clip.targetWord?.replace(/[^\p{L}\p{N}]/gu, "");
-    if (hinted) {
-      setTargetWord(hinted);
-      return;
-    }
     const longest = clip.words
       .map((w) => w.surface.replace(/[^\p{L}\p{N}]/gu, ""))
       .filter((w) => w.length > 0)
       .reduce((best, curr) => (curr.length > best.length ? curr : best), "");
     setTargetWord(longest);
-  }, [open, clip.words, clip.targetWord, targetWord]);
+  }, [open, clip.words, targetWord]);
 
   const captureScreenshot = useCallback(() => {
     const rp = playerRef.current;
